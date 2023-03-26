@@ -21,3 +21,4 @@ strict-rfc3339
 swagger-spec-validator
 urllib3
 webcolors
+Ta-Lib
