@@ -28,6 +28,7 @@ data_dict = {
     'close': [],
     'open': [],
     'high': [],
+    'low': [],
     'volume': []
 }
 index = []
