@@ -9,8 +9,8 @@ from datetime import datetime, timedelta
 import json
 from threading import Thread, Lock
 import h5py
-
-# Refactoring the code again
+import torch
+import torchvision.transforms as transforms
 
 class DatasetCreator:
     def __init__(self, csv_data_folder='./data/csv/', dataset_dir='./data/dataset/', feature_file='./data/dataset/feature.h5', label_file='./data/dataset/label.h5'):
@@ -21,12 +21,11 @@ class DatasetCreator:
         if not os.path.exists(self.dataset_dir):
             os.makedirs(self.dataset_dir)
 
-    
     def save_features_to_h5(self, timestamp: str, features: list[float]) -> None:
         """Save features to an h5py file."""
         with h5py.File(self.feature_file, 'w') as hf:
             hf.create_dataset(timestamp, data=features)
-                
+
     def save_labels_to_h5(self, timestamp: str, labels: list[int]) -> None:
         """Save features to an h5py file."""
         with h5py.File(self.label_file, 'w') as hf:
@@ -34,33 +33,36 @@ class DatasetCreator:
 
     def load_data(self, file: str) -> pd.DataFrame:
         """Load data from a given file."""
-        return pd.read_csv(self.csv_data_folder + file, index_col='index') # type: ignore
+        return pd.read_csv(self.csv_data_folder + file, index_col='index')  # type: ignore
 
     @staticmethod
     def filter_data(df: pd.DataFrame, timestamp: int) -> pd.DataFrame:
         """Filter data before a certain timestamp."""
         return df[df.index <= timestamp]
 
-    
     @staticmethod
     def generate_indicators(df: pd.DataFrame) -> list[float]:
-        """Generate TA-Lib indicators for a DataFrame."""
-        df = df.astype('float')
-        filtered_df = df[-1000:]  # Retain only the last 1000 data points
-
+        # 只取最后1000个数据
+        filtered_df = df[-1000:]
         indicators = []
-        ta_list = talib.get_functions()
-
-        for x in ta_list:
+        for function in talib.get_functions():
             try:
-                output = eval(f'abstract.{x}(filtered_df)')
-                last_output = output.values[-10:]
-                last_output = np.nan_to_num(last_output)
-                if isinstance(last_output[0], np.ndarray):
-                    last_output = [item for sublist in last_output for item in sublist]
-                indicators.extend(last_output)
-            except:
-                print(f"Error processing indicator: {x}")
+                output = eval(f'abstract.{function}(filtered_df)')
+                # 替换NaN
+                last_output = np.nan_to_num(output)
+                last_output = torch.from_numpy(last_output)
+                last_output = last_output.float()
+                shape = last_output.shape
+                # 检查是否是二维数组
+                if len(shape) == 1:
+                    last_output = last_output.reshape(shape[0], 1)
+                x_normalized = torch.nn.functional.normalize(last_output, dim=0)
+                x_normalized_list = x_normalized.reshape(-1).tolist()
+                latest_indicators = x_normalized_list[-10*last_output.shape[1]:]
+                indicators.extend(latest_indicators)
+
+            except Exception as e:
+                print(f"Error processing indicator: {function}, error: {e}")
         return indicators
 
     def process_in_time_range(self, start_time=datetime(2021, 1, 1), end_time=datetime(2022, 1, 1)):
@@ -68,14 +70,15 @@ class DatasetCreator:
         total_minutes = int((end_time - start_time).total_seconds() / 60)
         thread_list = []
         lock = Lock()
-        
+
         for minute in range(total_minutes):
             current_time = start_time + timedelta(minutes=minute)
             timestamp = int(current_time.timestamp())
-            thread = Thread(target=self.compute_features_and_labels, args=(timestamp, lock))
+            thread = Thread(
+                target=self.compute_features_and_labels, args=(timestamp, lock))
             thread.start()
             thread_list.append(thread)
-        
+
         for thread in thread_list:
             thread.join()
 
@@ -98,9 +101,11 @@ class DatasetCreator:
         features = indicators_1m + indicators_1h + indicators_1d
         labels = self.generate_labels(timestamp=timestamp, df_1m=df_1m)
         with lock:
-            self.save_features_to_h5(timestamp=str(timestamp), features=features)
+            print(f"writing timestamp {timestamp}")
+            self.save_features_to_h5(
+                timestamp=str(timestamp), features=features)
             self.save_labels_to_h5(timestamp=str(timestamp), labels=labels)
-        
+
     def generate_labels(self, timestamp: int, df_1m: pd.DataFrame) -> list[int]:
         """Generate labels for a specific timestamp."""
         earn_value = 5
@@ -110,10 +115,8 @@ class DatasetCreator:
 
         start_time = datetime.utcfromtimestamp(timestamp)
         end_time = start_time + timedelta(hours=24)
-
-        next_24h_data = df_1m[df_1m.index >= start_time.timestamp()]
-        next_24h_data = next_24h_data[next_24h_data.index <= end_time.timestamp()]
-
+        mask = (df_1m.index >= start_time.timestamp()) & (df_1m.index <= end_time.timestamp())
+        next_24h_data = df_1m[mask]
         startPrice = next_24h_data.iloc[0]['open']
 
         open_values = next_24h_data['open']
@@ -142,21 +145,26 @@ class DatasetCreator:
                 break
 
         return [label_1, label_2]
-    
+
     def compute_features_multithreaded(self, data_files: list[str]) -> None:
         """Compute features using multiple threads."""
         thread_list = []
         lock = Lock()
-        
+
         for file in data_files:
-            thread = Thread(target=self.compute_and_store_features, args=(file, lock)) # type: ignore
+            thread = Thread(target=self.compute_and_store_features, # type: ignore
+                            args=(file, lock))
             thread.start()
             thread_list.append(thread)
-        
+
         for thread in thread_list:
             thread.join()
+
 
 if __name__ == "__main__":
     # Create a new instance of the class
     data_processor = DatasetCreator()
     data_processor.process_in_time_range()
+    # test
+    # data_processor = DatasetCreator()
+    # data_processor.compute_features_and_labels(1609430400, Lock())
