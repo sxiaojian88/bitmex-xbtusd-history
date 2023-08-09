@@ -2,15 +2,11 @@ import os
 import pandas as pd
 import talib
 from talib import abstract
-
 import numpy as np
-from typing import Dict
 from datetime import datetime, timedelta
-import json
-from threading import Thread, Lock
 import h5py
 import torch
-import torchvision.transforms as transforms
+from concurrent.futures import ThreadPoolExecutor
 
 class DatasetCreator:
     def __init__(self, csv_data_folder='./data/csv/', dataset_dir='./data/dataset/', feature_file='./data/dataset/feature.h5', label_file='./data/dataset/label.h5'):
@@ -46,43 +42,34 @@ class DatasetCreator:
         filtered_df = df[-1000:]
         indicators = []
         for function in talib.get_functions():
-            try:
-                output = eval(f'abstract.{function}(filtered_df)')
-                # 替换NaN
-                last_output = np.nan_to_num(output)
-                last_output = torch.from_numpy(last_output)
-                last_output = last_output.float()
-                shape = last_output.shape
-                # 检查是否是二维数组
-                if len(shape) == 1:
-                    last_output = last_output.reshape(shape[0], 1)
-                x_normalized = torch.nn.functional.normalize(last_output, dim=0)
-                x_normalized_list = x_normalized.reshape(-1).tolist()
-                latest_indicators = x_normalized_list[-10*last_output.shape[1]:]
-                indicators.extend(latest_indicators)
+            if function == 'MAVP':
+                continue
+            output = eval(f'abstract.{function}(filtered_df)')
+            # 替换NaN
+            last_output = np.nan_to_num(output)
+            last_output = torch.from_numpy(last_output)
+            last_output = last_output.float()
+            shape = last_output.shape
+            # 检查是否是二维数组
+            if len(shape) == 1:
+                last_output = last_output.reshape(shape[0], 1)
+            x_normalized = torch.nn.functional.normalize(last_output, dim=0)
+            x_normalized_list = x_normalized.reshape(-1).tolist()
+            latest_indicators = x_normalized_list[-10*last_output.shape[1]:]
+            indicators.extend(latest_indicators)
 
-            except Exception as e:
-                print(f"Error processing indicator: {function}, error: {e}")
         return indicators
 
-    def process_in_time_range(self, start_time=datetime(2021, 1, 1), end_time=datetime(2022, 1, 1)):
-        """Main processing function."""
+    def process_in_time_range(self, start_time=datetime(2020, 2, 1), end_time=datetime(2023, 7, 1)):
         total_minutes = int((end_time - start_time).total_seconds() / 60)
-        thread_list = []
-        lock = Lock()
+        with h5py.File(self.label_file, 'w') as hf:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                for minute in range(total_minutes):
+                    current_time = start_time + timedelta(minutes=minute)
+                    timestamp = int(current_time.timestamp())
+                    executor.submit(self.compute_features_and_labels, timestamp)
 
-        for minute in range(total_minutes):
-            current_time = start_time + timedelta(minutes=minute)
-            timestamp = int(current_time.timestamp())
-            thread = Thread(
-                target=self.compute_features_and_labels, args=(timestamp, lock))
-            thread.start()
-            thread_list.append(thread)
-
-        for thread in thread_list:
-            thread.join()
-
-    def compute_features_and_labels(self, timestamp: int, lock: Lock):
+    def compute_features_and_labels(self, timestamp: int):
         # Load data
         df_1m = self.load_data('1m.csv')
         df_1h = self.load_data('1h.csv')
@@ -100,11 +87,11 @@ class DatasetCreator:
 
         features = indicators_1m + indicators_1h + indicators_1d
         labels = self.generate_labels(timestamp=timestamp, df_1m=df_1m)
-        with lock:
-            print(f"writing timestamp {timestamp}")
-            self.save_features_to_h5(
-                timestamp=str(timestamp), features=features)
-            self.save_labels_to_h5(timestamp=str(timestamp), labels=labels)
+        date = datetime.utcfromtimestamp(timestamp)
+        print(f"writing date {date}\n")
+        self.save_features_to_h5(
+            timestamp=str(timestamp), features=features)
+        self.save_labels_to_h5(timestamp=str(timestamp), labels=labels)
 
     def generate_labels(self, timestamp: int, df_1m: pd.DataFrame) -> list[int]:
         """Generate labels for a specific timestamp."""
@@ -146,25 +133,10 @@ class DatasetCreator:
 
         return [label_1, label_2]
 
-    def compute_features_multithreaded(self, data_files: list[str]) -> None:
-        """Compute features using multiple threads."""
-        thread_list = []
-        lock = Lock()
-
-        for file in data_files:
-            thread = Thread(target=self.compute_and_store_features, # type: ignore
-                            args=(file, lock))
-            thread.start()
-            thread_list.append(thread)
-
-        for thread in thread_list:
-            thread.join()
-
-
 if __name__ == "__main__":
     # Create a new instance of the class
     data_processor = DatasetCreator()
     data_processor.process_in_time_range()
     # test
     # data_processor = DatasetCreator()
-    # data_processor.compute_features_and_labels(1609430400, Lock())
+    # data_processor.compute_features_and_labels(int(datetime(2020, 2, 1).timestamp()))
